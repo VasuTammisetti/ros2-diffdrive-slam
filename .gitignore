@@ -1,0 +1,12 @@
+# ROS 2 / colcon build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+
+# Large serialized SLAM data (keep .pgm/.yaml + screenshots instead)
+*.posegraph
+*.data
