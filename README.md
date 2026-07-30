@@ -19,15 +19,15 @@ I wanted to actually understand a robot perception pipeline rather than just run
 
 The robot mapping a walled room while its camera detects a person. The left panel is the live camera feed with the YOLO bounding box; the main view is the occupancy grid being built from LiDAR.
 
-![SLAM map and live detection](images/slam_and_detection.png)
+![SLAM map and live detection](slam_and_detection.png)
 
 The simulation environment: the robot, a person, and a cone obstacle inside a walled room.
 
-![Gazebo scene](images/gazebo_scene.png)
+![Gazebo scene](gazebo_scene.png)
 
 The finished occupancy-grid map of the room in Gazebo alongside the SLAM output.
 
-![Mapped room](images/slam_map_gazebo.png)
+![Mapped room](slam_map_gazebo.png)
 
 Example VLM output. Calling the ROS service `describe_scene` sends the current camera frame to LLaVA and publishes its answer on `/scene_description`:
 
