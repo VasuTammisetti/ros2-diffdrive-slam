@@ -1,8 +1,7 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, TimerAction, RegisterEventHandler
-from launch.event_handlers import OnProcessExit
+from launch.actions import ExecuteProcess, TimerAction
 from launch.substitutions import Command
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -13,7 +12,6 @@ def generate_launch_description():
     xacro_file = os.path.join(pkg, 'urdf', 'robot.urdf.xacro')
     world_file = os.path.join(pkg, 'worlds', 'my_world.sdf')
 
-    # Generate the URDF text once, share it with both RSP and the spawn
     robot_description = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
 
     gazebo = ExecuteProcess(
@@ -40,6 +38,7 @@ def generate_launch_description():
         arguments=[
             '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
             '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
+            '/image@sensor_msgs/msg/Image[gz.msgs.Image',
         ],
         output='screen',
     )

@@ -10,3 +10,5 @@ __pycache__/
 # Large serialized SLAM data (keep .pgm/.yaml + screenshots instead)
 *.posegraph
 *.data
+*.pt
+vlm_env/
