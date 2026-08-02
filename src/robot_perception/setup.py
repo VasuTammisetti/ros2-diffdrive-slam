@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'yolo_node = robot_perception.yolo_node:main',
             'vlm_node = robot_perception.vlm_node:main',
+            'fusion_node = robot_perception.fusion_node:main',
         ],
     },
 )

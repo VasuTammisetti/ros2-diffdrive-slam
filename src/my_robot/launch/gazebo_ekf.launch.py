@@ -11,6 +11,7 @@ def generate_launch_description():
     pkg = get_package_share_directory('my_robot')
     xacro_file = os.path.join(pkg, 'urdf', 'robot.urdf.xacro')
     world_file = os.path.join(pkg, 'worlds', 'my_world.sdf')
+    ekf_config = os.path.join(pkg, 'config', 'ekf.yaml')
 
     robot_description = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
 
@@ -56,6 +57,14 @@ def generate_launch_description():
         output='screen',
     )
 
+    # The EKF: fuses wheel odom + IMU, publishes odom -> base_footprint
+    ekf = Node(
+        package='robot_localization', executable='ekf_node',
+        name='ekf_filter_node', output='screen',
+        parameters=[ekf_config, {'use_sim_time': True}],
+    )
+
     return LaunchDescription([
-        gazebo, robot_state_publisher, spawn, bridge, jsb_spawner, diff_spawner,
+        gazebo, robot_state_publisher, spawn, bridge,
+        jsb_spawner, diff_spawner, ekf,
     ])
