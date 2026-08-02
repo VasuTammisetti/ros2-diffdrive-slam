@@ -1,23 +1,25 @@
 # ros2-diffdrive-slam
 
-A differential-drive robot I built from scratch in ROS 2 to learn the full perception stack for a mobile robot: 2D LiDAR SLAM for mapping, YOLOv8n for real-time object detection, and a LLaVA vision-language model for scene understanding. Everything runs live in simulation.
+A differential-drive robot I built from scratch in ROS 2 to learn a full mobile-robot perception and state-estimation stack. It maps a room with 2D LiDAR SLAM, fuses wheel odometry with an IMU for a steadier pose, detects objects with YOLOv8, drops detected objects onto the map by combining the camera with the LiDAR, and describes what it sees in plain language with a vision-language model. Everything runs live in simulation.
 
 Built on ROS 2 Jazzy and Gazebo Harmonic, developed on Ubuntu 24.04 under WSL2 with an RTX 2070.
 
 ## Why I built it
 
-I wanted to actually understand a robot perception pipeline rather than just run someone else's launch file. So I started with an empty package and added one piece at a time: the robot body, the wheels, a LiDAR, the drive controller, mapping, then a camera, object detection, and finally a VLM for scene description. Each layer had to work before I moved to the next, which meant debugging the whole pipeline: TF frames, ros2_control, the Gazebo to ROS sensor bridge, SLAM, and GPU memory budgeting for the vision models.
+I wanted to actually understand how a robot perception stack fits together rather than run someone else's launch file. So I started with an empty package and added one piece at a time: the robot body, the wheels, a LiDAR, the drive controller, mapping, then a camera, object detection, sensor fusion, and finally a language model for scene description. Each layer had to work before I moved on, which meant I ended up debugging the whole pipeline myself, from TF frames and controllers to the sensor bridge, the EKF, and GPU memory budgeting for the vision models.
 
 ## What it does
 
-- A custom differential-drive robot, described in URDF and driven with ros2_control
-- LiDAR SLAM that builds and saves a 2D occupancy-grid map of the room
-- A camera running YOLOv8n on the GPU for real-time object detection
-- A LLaVA vision-language model, served over FastAPI, that describes the robot's camera view on demand through a ROS service
+- A custom differential-drive robot described in URDF and driven with ros2_control
+- 2D LiDAR SLAM (slam_toolbox) that builds and saves an occupancy-grid map
+- Wheel-odometry and IMU fusion through an EKF (robot_localization) for a steadier pose estimate
+- YOLOv8n object detection on the camera, running on the GPU
+- Camera-LiDAR fusion that places detected objects on the map with a distance label
+- A LLaVA vision-language model, served over FastAPI, that describes the camera view on request
 
 ## Results
 
-The robot mapping a walled room while its camera detects a person. The left panel is the live camera feed with the YOLO bounding box; the main view is the occupancy grid being built from LiDAR.
+The robot mapping a walled room while its camera detects a person. The occupancy grid is built from LiDAR; the overlaid pose graph shows the trajectory and loop closures slam_toolbox uses to keep the map consistent.
 
 ![SLAM map and live detection](slam_and_detection.png)
 
@@ -25,19 +27,23 @@ The simulation environment: the robot, a person, and a cone obstacle inside a wa
 
 ![Gazebo scene](gazebo_scene.png)
 
-The finished occupancy-grid map of the room in Gazebo alongside the SLAM output.
+The occupancy-grid map of the room.
 
 ![Mapped room](slam_map_gazebo.png)
 
-Example VLM output. Calling the ROS service `describe_scene` sends the current camera frame to LLaVA and publishes its answer on `/scene_description`:
+Camera-LiDAR fusion. When YOLO detects a person, the node estimates the bearing from the bounding box, reads the LiDAR range at that bearing, and places a labelled marker on the map at the object's position. Here the marker reads "person (2.2m)".
 
-> In the image, there is a person standing in the center. The person is wearing a white t-shirt and blue jeans. They are barefoot and appear to be standing on a flat surface. The background is a simple, abstract design with a gradient of colors. There are no other objects or obstacles visible.
+![Camera-LiDAR fusion marker](fusion_marker.png)
+
+Example VLM output. Calling the ROS service `describe_scene` sends the current camera frame to LLaVA and publishes the answer on `/scene_description`:
+
+> In the image, there is a person standing in front of a blue wall. The person is wearing a white t-shirt and blue jeans. They are standing with their arms at their sides and their head facing forward. There are no other objects or obstacles visible in the image.
+
+![VLM scene description](slam-vlm.jpg)
 
 ## How it fits together
 
-The robot is spawned into Gazebo, which simulates physics, the LiDAR, and the camera. robot_state_publisher publishes the TF tree from the URDF. ros2_control, through the gz_ros2_control plugin, runs a diff_drive_controller that turns velocity commands into wheel speeds and publishes odometry plus the odom to base_footprint transform. slam_toolbox consumes the laser scans and TF to build the map and publish the map to odom transform. In parallel, a YOLO node reads the camera and publishes detections, and a VLM node forwards camera frames to a LLaVA server on request.
-
-Data flow: teleop publishes cmd_vel, diff_drive_controller converts it to wheel velocities, Gazebo produces /scan and /image, slam_toolbox builds /map from the scans and TF, the YOLO node produces /detections, and the VLM node produces /scene_description on demand.
+Gazebo simulates physics, the LiDAR, the camera, and the IMU. robot_state_publisher publishes the TF tree from the URDF. ros2_control runs a diff_drive_controller that turns velocity commands into wheel speeds and publishes wheel odometry. An EKF from robot_localization fuses that wheel odometry with the IMU and publishes the odom to base_footprint transform, so the pose is more robust than wheels alone. slam_toolbox consumes the laser scans and the TF tree to build the map and publish the map to odom transform. In parallel, a YOLO node detects objects on the camera, a fusion node places detections on the map using the LiDAR, and a VLM node forwards camera frames to a LLaVA server on request.
 
 ## The robot
 
@@ -49,26 +55,27 @@ A differential-drive base built with xacro macros:
 - caster: passive sphere for balance
 - lidar_link: 360 degree laser mount
 - camera_link: forward-facing RGB camera
+- imu_link: IMU mount
 
-The LiDAR is a gpu_lidar sensor: 360 samples over a full circle, 10 Hz, 10 m range. The camera is a 640x480 RGB sensor at 15 Hz.
+The LiDAR is a 360-sample gpu_lidar at 10 Hz, 10 m range. The camera is 640x480 RGB. The IMU runs at 50 Hz.
 
-## Perception layers
+## Perception and state estimation, layer by layer
 
-Three complementary layers, each doing what it is best at:
+- EKF (robot_localization): fuses wheel odometry and the IMU into the odom to base_footprint transform. Runs continuously.
+- LiDAR SLAM (slam_toolbox): builds the map and localizes, using the EKF pose. Runs continuously.
+- YOLOv8n: fast object detection, real-time bounding boxes for the 80 COCO classes.
+- Camera-LiDAR fusion: turns a 2D detection into a map position by matching the camera bearing to the LiDAR ray, then publishes a labelled marker.
+- LLaVA-1.6-Mistral-7B: rich scene description in natural language, on demand through a ROS service (a few seconds per frame).
 
-- LiDAR SLAM (slam_toolbox): geometry. Builds the map and localizes the robot. Runs continuously.
-- YOLOv8n: fast object detection. Real-time bounding boxes for the 80 COCO classes, including people. GPU, FP16.
-- LLaVA-1.6-Mistral-7B: rich scene understanding in natural language. Slow (a few seconds per frame), so it runs on demand via a ROS service, not continuously.
-
-A note on hardware: on an 8 GB GPU, YOLO, LLaVA, and Gazebo's renderer cannot all run at full tilt at once. I profiled the VRAM usage and run detection and the VLM as two separate modes rather than concurrently. Running both together would need heavier quantization or a larger GPU.
+A note on hardware. On an 8 GB GPU, YOLO, LLaVA, and Gazebo cannot all run at full tilt at once. I profiled the VRAM and run detection/fusion and the VLM as two separate modes rather than concurrently. Knowing when that trade-off is needed matters more than pretending the hardware is unlimited.
 
 ## Running it
 
-1. Simulation, robot, and control. The plugin-path export is required so Gazebo can find the ros2_control system plugin:
+1. Simulation, robot, control, and EKF. The plugin-path export is required so Gazebo finds the ros2_control system plugin:
 
 ```bash
 export GZ_SIM_SYSTEM_PLUGIN_PATH=/opt/ros/jazzy/lib
-ros2 launch my_robot gazebo.launch.py
+ros2 launch my_robot gazebo_ekf.launch.py
 ```
 
 2. SLAM:
@@ -83,20 +90,18 @@ ros2 launch slam_toolbox online_async_launch.py use_sim_time:=true
 ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p stamped:=true -r cmd_vel:=/diff_drive_controller/cmd_vel
 ```
 
-4. Object detection:
+4. Object detection, or camera-LiDAR fusion (fusion publishes map markers on /fused_objects):
 
 ```bash
 ros2 run robot_perception yolo_node
+ros2 run robot_perception fusion_node --ros-args -p use_sim_time:=true
 ```
 
-5. VLM scene understanding. Start the LLaVA server (own virtual environment), then the ROS node, then call the service:
+5. VLM scene understanding. Start the LLaVA server in its own environment, then the ROS node, then call the service:
 
 ```bash
-# terminal A (vlm_env active)
-cd ~/vlm_server && uvicorn vlm_server:app --host 0.0.0.0 --port 8000
-# terminal B
+cd ~/vlm_server && VLM_MODEL=llava uvicorn vlm_server:app --host 0.0.0.0 --port 8000
 ros2 run robot_perception vlm_node
-# terminal C
 ros2 service call /describe_scene std_srvs/srv/Trigger
 ```
 
@@ -110,20 +115,23 @@ ros2 run nav2_map_server map_saver_cli -f ~/slam_ws/room_map --ros-args -p use_s
 
 These cost me real time, so I am writing them down:
 
-- teleop did nothing at first. In Jazzy, diff_drive_controller subscribes to a TwistStamped, not a plain Twist. teleop_twist_keyboard publishes Twist by default, so the robot just sat there. Fix: run teleop with -p stamped:=true.
-- The controllers never loaded. The controller_manager service never came up because Gazebo could not find the gz_ros2_control system plugin library. Fix: export GZ_SIM_SYSTEM_PLUGIN_PATH=/opt/ros/jazzy/lib before launching.
-- My world would not load. Passing the world through the ros_gz_sim launch include silently dropped it and Gazebo started an empty default world. Running gz sim with the world file as a direct argument fixed it.
-- slam_toolbox produced no map. The bare ros2 run of the node never activated it. Its own online_async_launch.py sets it up as a lifecycle node and activates it, which is what actually starts mapping.
-- A NumPy version clash broke YOLO (numpy.core.multiarray failed to import). Pinning numpy below 2.0 fixed it.
-- The VLM service timed out when YOLO and LLaVA ran together. The GPU was maxed at 8 GB. Stopping YOLO freed enough VRAM for LLaVA to respond quickly.
+- teleop did nothing at first. In Jazzy, diff_drive_controller subscribes to a TwistStamped, not a plain Twist, so the robot just sat there. Fix: run teleop with -p stamped:=true.
+- The controllers never loaded because Gazebo could not find the gz_ros2_control system plugin. Fix: export GZ_SIM_SYSTEM_PLUGIN_PATH=/opt/ros/jazzy/lib before launching.
+- The world silently would not load through the launch include; Gazebo started an empty default world. Running gz sim with the world file as a direct argument fixed it.
+- slam_toolbox produced no map when run as a bare node. Its own online_async launch activates it as a lifecycle node, which is what actually starts mapping.
+- The map came out smeared with lines crossing the walls. The cause was the EKF over-trusting a noisy simulated IMU yaw, which made the heading jump about 30 degrees while the robot was standing still. Fixing the EKF to fuse IMU yaw rate only, and take heading from wheel odometry, gave a stable pose and a clean map.
+- The fusion node never placed a marker at first. It was reading a single LiDAR ray at the detection bearing, which was often infinite. Searching a small window of rays and taking the median range fixed it.
+- The fusion markers published but did not render in RViz. They were stamped with wall-clock time while everything else ran on sim time, so RViz discarded them. Running the node with use_sim_time:=true fixed it.
+- A NumPy 2.x clash broke YOLO. Pinning numpy below 2.0 fixed it.
+- Running YOLO and LLaVA together maxed the 8 GB GPU and the VLM timed out. Running them as separate modes solved it.
 
 ## What I would do next
 
-- Fuse YOLO detections into the map to produce a semantic map (labelled regions), rather than running detection and mapping in parallel.
-- Fuse wheel odometry with an IMU (via robot_localization) so the pose estimate survives wheel slip.
-- Layer Nav2 on top of the saved map for autonomous navigation.
-- Use the VLM output to gate behaviour, for example stop or reroute when it reports a person ahead.
+- Fuse detections into the map as a persistent semantic layer rather than transient markers.
+- Try a lighter VLM (Phi-3.5-Vision or similar) so detection and scene description can run at the same time within the GPU budget.
+- Layer Nav2 on the saved map for autonomous navigation.
+- Mask detected people before SLAM feature matching so moving people do not corrupt the map, which matters for robots working around humans.
 
 ## Stack
 
-ROS 2 Jazzy, Gazebo Harmonic, ros2_control, slam_toolbox, YOLOv8n (Ultralytics), LLaVA-1.6-Mistral-7B, FastAPI, xacro/URDF, Python launch files, WSL2 (Ubuntu 24.04, RTX 2070)
+ROS 2 Jazzy, Gazebo Harmonic, ros2_control, slam_toolbox, robot_localization (EKF), YOLOv8n (Ultralytics), LLaVA-1.6-Mistral-7B, FastAPI, xacro/URDF, Python launch files, WSL2 (Ubuntu 24.04, RTX 2070)
